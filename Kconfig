@@ -1,0 +1,5 @@
+config ZMK_HOLYIOT_SYSTEM
+    bool "HolyIoT Custom System Logic"
+    default y
+    help
+      Enable custom HolyIoT battery and LED logic.

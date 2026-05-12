@@ -1,0 +1,4 @@
+name: zmk_holyiot_system
+build:
+  cmake: .
+  kconfig: Kconfig
