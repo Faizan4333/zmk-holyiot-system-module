@@ -2,7 +2,8 @@
 #include <zephyr/device.h>
 #include <zephyr/drivers/gpio.h>
 #include <zephyr/logging/log.h>
-#include <zmk/battery.h>
+
+extern uint8_t zmk_battery_state_of_charge(void);
 
 LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
 
