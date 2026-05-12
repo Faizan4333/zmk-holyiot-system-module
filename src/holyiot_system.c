@@ -7,29 +7,26 @@ extern uint8_t zmk_battery_state_of_charge(void);
 
 LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
 
-#define PORT0 "GPIO_0"
-#define PORT1 "GPIO_1"
-
-#define PIN_USB_DETECT 4  // P1.04
+#define PIN_USB_DETECT 29 // P0.29
 #define PIN_CHG_STATUS 30 // P0.30
 #define PIN_BUTTON     5  // P0.05
 #define PIN_LED_25     14 // P1.14
 #define PIN_LED_50     12 // P1.12
 #define PIN_LED_75     25 // P0.25
 
-static const struct device *gpio0;
-static const struct device *gpio1;
+static const struct device *gpio0 = DEVICE_DT_GET(DT_NODELABEL(gpio0));
+static const struct device *gpio1 = DEVICE_DT_GET(DT_NODELABEL(gpio1));
 
 static bool blink_state = false;
 
 static void system_work_handler(struct k_work *work) {
-    if (!gpio0 || !gpio1) return;
+    if (!device_is_ready(gpio0) || !device_is_ready(gpio1)) return;
 
     // Read battery percentage from ZMK native tracker
     uint8_t percentage = zmk_battery_state_of_charge();
 
     // Read digital pins
-    int usb_connected = (gpio_pin_get_raw(gpio1, PIN_USB_DETECT) == 0);
+    int usb_connected = (gpio_pin_get_raw(gpio0, PIN_USB_DETECT) == 0);
     int fully_charged = (gpio_pin_get_raw(gpio0, PIN_CHG_STATUS) == 0);
     int button_pressed = (gpio_pin_get_raw(gpio0, PIN_BUTTON) == 1);
 
@@ -77,17 +74,14 @@ static void system_timer_handler(struct k_timer *timer) {
 
 K_TIMER_DEFINE(system_timer, system_timer_handler, NULL);
 
-static int holyiot_system_init(const struct device *dev) {
-    gpio0 = device_get_binding(PORT0);
-    gpio1 = device_get_binding(PORT1);
-
-    if (!gpio0 || !gpio1) {
+static int holyiot_system_init(void) {
+    if (!device_is_ready(gpio0) || !device_is_ready(gpio1)) {
         LOG_ERR("Failed to get GPIO devices");
         return -ENODEV;
     }
 
     // Configure inputs
-    gpio_pin_configure(gpio1, PIN_USB_DETECT, GPIO_INPUT | GPIO_PULL_UP);
+    gpio_pin_configure(gpio0, PIN_USB_DETECT, GPIO_INPUT | GPIO_PULL_UP);
     gpio_pin_configure(gpio0, PIN_CHG_STATUS, GPIO_INPUT | GPIO_PULL_UP);
     gpio_pin_configure(gpio0, PIN_BUTTON, GPIO_INPUT | GPIO_PULL_DOWN);
 
