@@ -2,6 +2,8 @@
 #include <zephyr/device.h>
 #include <zephyr/drivers/gpio.h>
 #include <zephyr/logging/log.h>
+#include <zephyr/pm/device.h>
+#include <zephyr/bluetooth/bluetooth.h>
 
 extern uint8_t zmk_battery_state_of_charge(void);
 
@@ -18,9 +20,53 @@ static const struct device *gpio0 = DEVICE_DT_GET(DT_NODELABEL(gpio0));
 static const struct device *gpio1 = DEVICE_DT_GET(DT_NODELABEL(gpio1));
 
 static bool blink_state = false;
+static bool system_is_off = false;
 
 static void system_work_handler(struct k_work *work) {
     if (!device_is_ready(gpio0) || !device_is_ready(gpio1)) return;
+
+    // Read Power Switch
+    int power_switch_off = (gpio_pin_get_raw(gpio0, PIN_BUTTON) == 1);
+
+    if (power_switch_off && !system_is_off) {
+        LOG_INF("Soft Power Switch: OFF");
+        system_is_off = true;
+        
+        // Suspend Matrix
+        const struct device *kscan = DEVICE_DT_GET(DT_CHOSEN(zmk_kscan));
+        if (device_is_ready(kscan)) {
+            pm_device_action_run(kscan, PM_DEVICE_ACTION_SUSPEND);
+        }
+        
+        // Suspend Trackpad
+        const struct device *trackpad = DEVICE_DT_GET(DT_NODELABEL(trackpad));
+        if (device_is_ready(trackpad)) {
+            pm_device_action_run(trackpad, PM_DEVICE_ACTION_SUSPEND);
+        }
+
+#ifdef CONFIG_BT_DISABLE
+        bt_disable();
+#endif
+    } else if (!power_switch_off && system_is_off) {
+        LOG_INF("Soft Power Switch: ON");
+        system_is_off = false;
+
+        // Resume Matrix
+        const struct device *kscan = DEVICE_DT_GET(DT_CHOSEN(zmk_kscan));
+        if (device_is_ready(kscan)) {
+            pm_device_action_run(kscan, PM_DEVICE_ACTION_RESUME);
+        }
+
+        // Resume Trackpad
+        const struct device *trackpad = DEVICE_DT_GET(DT_NODELABEL(trackpad));
+        if (device_is_ready(trackpad)) {
+            pm_device_action_run(trackpad, PM_DEVICE_ACTION_RESUME);
+        }
+
+#ifdef CONFIG_BT_DISABLE
+        bt_enable(NULL);
+#endif
+    }
 
     // Read battery percentage from ZMK native tracker
     uint8_t percentage = zmk_battery_state_of_charge();
@@ -28,11 +74,6 @@ static void system_work_handler(struct k_work *work) {
     // Read digital pins
     int usb_connected = (gpio_pin_get_raw(gpio0, PIN_USB_DETECT) == 0);
     int fully_charged = (gpio_pin_get_raw(gpio0, PIN_CHG_STATUS) == 0);
-    int button_pressed = (gpio_pin_get_raw(gpio0, PIN_BUTTON) == 1);
-
-    if (button_pressed) {
-        LOG_INF("BUTTON IS ON");
-    }
 
     blink_state = !blink_state;
 
