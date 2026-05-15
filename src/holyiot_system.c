@@ -6,11 +6,9 @@
 #include <zephyr/bluetooth/bluetooth.h>
 #include <zephyr/bluetooth/conn.h>
 #include <zephyr/bluetooth/hci.h>
+#include <zephyr/bluetooth/gap.h>
 
-/* ZMK internal functions — resolved at link time */
 extern uint8_t zmk_battery_state_of_charge(void);
-extern int zmk_ble_adv_resume(void);
-extern int zmk_ble_adv_pause(void);
 
 LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
 
@@ -24,10 +22,10 @@ LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
 static const struct device *gpio0 = DEVICE_DT_GET(DT_NODELABEL(gpio0));
 static const struct device *gpio1 = DEVICE_DT_GET(DT_NODELABEL(gpio1));
 
-static bool blink_state    = false;
-static bool system_is_off  = false;
+static bool blink_state   = false;
+static bool system_is_off = false;
 
-/* Forcibly drop every active BLE connection */
+/* Drop every active BLE connection */
 static void force_disconnect_conn(struct bt_conn *conn, void *data) {
     struct bt_conn_info info;
     if (bt_conn_get_info(conn, &info) == 0 &&
@@ -36,10 +34,25 @@ static void force_disconnect_conn(struct bt_conn *conn, void *data) {
     }
 }
 
-/* Called every 500ms tick while switch is OFF — keeps BLE suppressed */
+/* Called every 500ms tick while switch is OFF — keeps BLE dead */
 static void suppress_bluetooth(void) {
-    zmk_ble_adv_pause();
+    bt_le_adv_stop();
     bt_conn_foreach(BT_CONN_TYPE_LE, force_disconnect_conn, NULL);
+}
+
+/* Restart connectable advertising so the host can reconnect */
+static void restart_bluetooth_adv(void) {
+    static const struct bt_le_adv_param adv_param =
+        BT_LE_ADV_PARAM_INIT(
+            BT_LE_ADV_OPT_CONNECTABLE | BT_LE_ADV_OPT_USE_NAME,
+            BT_GAP_ADV_FAST_INT_MIN_2,   /* 100 ms min interval */
+            BT_GAP_ADV_FAST_INT_MAX_2,   /* 150 ms max interval */
+            NULL);
+
+    int ret = bt_le_adv_start(&adv_param, NULL, 0, NULL, 0);
+    if (ret < 0 && ret != -EALREADY) {
+        LOG_WRN("Failed to restart BLE advertising: %d", ret);
+    }
 }
 
 static void set_input_devices(enum pm_device_action action) {
@@ -48,7 +61,6 @@ static void set_input_devices(enum pm_device_action action) {
     if (device_is_ready(kscan)) {
         pm_device_action_run(kscan, action);
     }
-
     /* Trackpad / mouse */
     const struct device *trackpad = DEVICE_DT_GET(DT_NODELABEL(trackpad));
     if (device_is_ready(trackpad)) {
@@ -59,29 +71,21 @@ static void set_input_devices(enum pm_device_action action) {
 static void on_power_off(void) {
     LOG_INF("Soft Power Switch: OFF");
     system_is_off = true;
-
-    /* Suspend keyboard matrix + trackpad */
     set_input_devices(PM_DEVICE_ACTION_SUSPEND);
-
-    /* Pause ZMK advertising + drop connections */
     suppress_bluetooth();
 }
 
 static void on_power_on(void) {
     LOG_INF("Soft Power Switch: ON");
     system_is_off = false;
-
-    /* Resume keyboard matrix + trackpad */
     set_input_devices(PM_DEVICE_ACTION_RESUME);
-
-    /* Tell ZMK to restart BLE advertising */
-    zmk_ble_adv_resume();
+    restart_bluetooth_adv();
 }
 
 static void system_work_handler(struct k_work *work) {
     if (!device_is_ready(gpio0) || !device_is_ready(gpio1)) return;
 
-    /* HIGH on P0.05 = switch OFF */
+    /* HIGH on P0.05 (3.3 V) = switch OFF */
     int power_switch_off = (gpio_pin_get_raw(gpio0, PIN_BUTTON) == 1);
 
     if (power_switch_off && !system_is_off) {
@@ -91,17 +95,17 @@ static void system_work_handler(struct k_work *work) {
     } else if (power_switch_off && system_is_off) {
         /*
          * Switch is still OFF — keep suppressing BLE every tick.
-         * ZMK will try to restart advertising on its own event loop;
-         * we fight it continuously until the user flips the switch ON.
+         * ZMK may try to restart advertising from its own event loop;
+         * we outrun it continuously until the switch flips back ON.
          */
         suppress_bluetooth();
     }
 
-    /* ── Battery + LED logic (always runs regardless of switch state) ── */
+    /* ── Battery + LED logic (runs regardless of switch state) ── */
 
-    uint8_t percentage   = zmk_battery_state_of_charge();
-    int usb_connected    = (gpio_pin_get_raw(gpio0, PIN_USB_DETECT) == 0);
-    int fully_charged    = (gpio_pin_get_raw(gpio0, PIN_CHG_STATUS) == 0);
+    uint8_t percentage = zmk_battery_state_of_charge();
+    int usb_connected  = (gpio_pin_get_raw(gpio0, PIN_USB_DETECT) == 0);
+    int fully_charged  = (gpio_pin_get_raw(gpio0, PIN_CHG_STATUS) == 0);
 
     blink_state = !blink_state;
 
