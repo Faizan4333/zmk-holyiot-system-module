@@ -4,6 +4,7 @@
 #include <zephyr/logging/log.h>
 #include <zephyr/pm/device.h>
 #include <zephyr/bluetooth/bluetooth.h>
+#include <zephyr/bluetooth/conn.h>
 
 extern uint8_t zmk_battery_state_of_charge(void);
 
@@ -21,6 +22,10 @@ static const struct device *gpio1 = DEVICE_DT_GET(DT_NODELABEL(gpio1));
 
 static bool blink_state = false;
 static bool system_is_off = false;
+
+static void disconnect_conn(struct bt_conn *conn, void *data) {
+    bt_conn_disconnect(conn, BT_HCI_ERR_REMOTE_USER_TERM_CONN);
+}
 
 static void system_work_handler(struct k_work *work) {
     if (!device_is_ready(gpio0) || !device_is_ready(gpio1)) return;
@@ -44,9 +49,10 @@ static void system_work_handler(struct k_work *work) {
             pm_device_action_run(trackpad, PM_DEVICE_ACTION_SUSPEND);
         }
 
-#ifdef CONFIG_BT_DISABLE
-        bt_disable();
-#endif
+        // Disconnect all BLE devices and stop advertising
+        bt_le_adv_stop();
+        bt_conn_foreach(BT_CONN_TYPE_LE, disconnect_conn, NULL);
+
     } else if (!power_switch_off && system_is_off) {
         LOG_INF("Soft Power Switch: ON");
         system_is_off = false;
@@ -63,9 +69,7 @@ static void system_work_handler(struct k_work *work) {
             pm_device_action_run(trackpad, PM_DEVICE_ACTION_RESUME);
         }
 
-#ifdef CONFIG_BT_DISABLE
-        bt_enable(NULL);
-#endif
+        // We do not manually restart advertising, ZMK handles it on key presses!
     }
 
     // Read battery percentage from ZMK native tracker
