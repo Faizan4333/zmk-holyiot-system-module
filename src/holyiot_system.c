@@ -25,8 +25,21 @@ static const struct device *gpio1 = DEVICE_DT_GET(DT_NODELABEL(gpio1));
 static bool blink_state   = false;
 static bool system_is_off = false;
 
-/* Drop every active BLE connection */
-static void force_disconnect_conn(struct bt_conn *conn, void *data) {
+/* ── BT connection callback: kill any new connection immediately when OFF ── */
+static void on_bt_connected(struct bt_conn *conn, uint8_t err) {
+    if (err) return;
+    if (system_is_off) {
+        LOG_INF("Switch OFF — rejecting BT connection");
+        bt_conn_disconnect(conn, BT_HCI_ERR_REMOTE_USER_TERM_CONN);
+    }
+}
+
+BT_CONN_CB_DEFINE(holyiot_conn_cb) = {
+    .connected = on_bt_connected,
+};
+
+/* Drop every currently active BLE connection */
+static void drop_all_connections(struct bt_conn *conn, void *data) {
     struct bt_conn_info info;
     if (bt_conn_get_info(conn, &info) == 0 &&
         info.state == BT_CONN_STATE_CONNECTED) {
@@ -34,19 +47,19 @@ static void force_disconnect_conn(struct bt_conn *conn, void *data) {
     }
 }
 
-/* Called every 500ms tick while switch is OFF — keeps BLE dead */
+/* Called every 200ms tick while switch is OFF */
 static void suppress_bluetooth(void) {
     bt_le_adv_stop();
-    bt_conn_foreach(BT_CONN_TYPE_LE, force_disconnect_conn, NULL);
+    bt_conn_foreach(BT_CONN_TYPE_LE, drop_all_connections, NULL);
 }
 
-/* Restart connectable advertising so the host can reconnect */
+/* Restart connectable advertising so host can reconnect */
 static void restart_bluetooth_adv(void) {
     static const struct bt_le_adv_param adv_param =
         BT_LE_ADV_PARAM_INIT(
             BT_LE_ADV_OPT_CONNECTABLE | BT_LE_ADV_OPT_USE_NAME,
-            BT_GAP_ADV_FAST_INT_MIN_2,   /* 100 ms min interval */
-            BT_GAP_ADV_FAST_INT_MAX_2,   /* 150 ms max interval */
+            BT_GAP_ADV_FAST_INT_MIN_2,
+            BT_GAP_ADV_FAST_INT_MAX_2,
             NULL);
 
     int ret = bt_le_adv_start(&adv_param, NULL, 0, NULL, 0);
@@ -56,12 +69,10 @@ static void restart_bluetooth_adv(void) {
 }
 
 static void set_input_devices(enum pm_device_action action) {
-    /* Keyboard matrix */
     const struct device *kscan = DEVICE_DT_GET(DT_CHOSEN(zmk_kscan));
     if (device_is_ready(kscan)) {
         pm_device_action_run(kscan, action);
     }
-    /* Trackpad / mouse */
     const struct device *trackpad = DEVICE_DT_GET(DT_NODELABEL(trackpad));
     if (device_is_ready(trackpad)) {
         pm_device_action_run(trackpad, action);
@@ -85,7 +96,6 @@ static void on_power_on(void) {
 static void system_work_handler(struct k_work *work) {
     if (!device_is_ready(gpio0) || !device_is_ready(gpio1)) return;
 
-    /* HIGH on P0.05 (3.3 V) = switch OFF */
     int power_switch_off = (gpio_pin_get_raw(gpio0, PIN_BUTTON) == 1);
 
     if (power_switch_off && !system_is_off) {
@@ -94,14 +104,13 @@ static void system_work_handler(struct k_work *work) {
         on_power_on();
     } else if (power_switch_off && system_is_off) {
         /*
-         * Switch is still OFF — keep suppressing BLE every tick.
-         * ZMK may try to restart advertising from its own event loop;
-         * we outrun it continuously until the switch flips back ON.
+         * Switch still OFF — keep suppressing BLE every 200ms.
+         * The bt_conn_cb will also kill any connection that sneaks through.
          */
         suppress_bluetooth();
     }
 
-    /* ── Battery + LED logic (runs regardless of switch state) ── */
+    /* ── Battery + LED logic (always runs) ── */
 
     uint8_t percentage = zmk_battery_state_of_charge();
     int usb_connected  = (gpio_pin_get_raw(gpio0, PIN_USB_DETECT) == 0);
@@ -160,7 +169,8 @@ static int holyiot_system_init(void) {
     gpio_pin_configure(gpio1, PIN_LED_50, GPIO_OUTPUT_INACTIVE);
     gpio_pin_configure(gpio0, PIN_LED_75, GPIO_OUTPUT_INACTIVE);
 
-    k_timer_start(&system_timer, K_MSEC(500), K_MSEC(500));
+    /* 200ms timer — fast enough to outrun ZMK's BLE restart attempts */
+    k_timer_start(&system_timer, K_MSEC(200), K_MSEC(200));
 
     return 0;
 }
